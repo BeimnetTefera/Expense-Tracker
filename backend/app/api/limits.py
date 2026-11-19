@@ -37,6 +37,18 @@ class SlidingWindowLimiter:
             timestamps.append(now)
             return None
 
+    def peek(self, key: str) -> tuple[int, float | None]:
+        """Look WITHOUT recording: (requests left, seconds until the next slot frees).
+        The second value is None when nothing is in the window."""
+        now = time.monotonic()
+        with self.lock:
+            timestamps = self.hits[key]
+            while timestamps and now - timestamps[0] >= self.window:
+                timestamps.popleft()
+            left = max(0, self.limit - len(timestamps))
+            next_free = self.window - (now - timestamps[0]) if timestamps else None
+            return left, next_free
+
     def refund(self, key: str):
         """Give back the most recent request for `key` (it failed on our side)."""
         with self.lock:
@@ -78,6 +90,23 @@ def refund_chat_limits(session_id: str, client_ip: str):
     per_ip.refund(client_ip)
     per_session.refund(session_id)
     global_daily.refund("all")
+
+
+def chat_allowance(session_id: str, client_ip: str) -> dict:
+    """What the UI's "N/10 msgs left" pill shows. The server is the source of truth:
+    the browser's own count would reset on reload and can't see the IP/daily layers.
+    remaining = the tightest of the three layers (the one that would refuse first)."""
+    layers = [
+        per_session.peek(session_id),
+        per_ip.peek(client_ip),
+        global_daily.peek("all"),
+    ]
+    remaining, next_free = min(layers, key=lambda layer: layer[0])
+    return {
+        "limit": per_session.limit,
+        "remaining": min(remaining, per_session.limit),
+        "resets_in": round(next_free, 1) if next_free is not None else None,
+    }
 
 
 def reset_all():

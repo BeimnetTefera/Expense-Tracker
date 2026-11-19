@@ -1,0 +1,23 @@
+# Render "Blueprint": tells Render how to run the backend.
+# Render dashboard -> New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: expense-tracker-api
+    runtime: python
+    plan: free
+    rootDir: backend                      # run everything from backend/
+    buildCommand: pip install -r requirements.txt
+    # --proxy-headers: Render sits in front of us, so the visitor's real IP
+    # arrives in X-Forwarded-For. Without it, every visitor looks like the
+    # same proxy IP and the per-IP rate limit would block everyone together.
+    startCommand: uvicorn app.api.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips '*'
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.14.4"
+      - key: MAX_STEPS
+        value: "5"
+      - key: GROQ_API_KEY
+        sync: false                       # secret: Render asks you for it
+      - key: ALLOWED_ORIGINS
+        sync: false                       # your Vercel URL, set after step 2

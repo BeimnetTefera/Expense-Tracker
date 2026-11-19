@@ -22,12 +22,12 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MAX_STEPS = int(os.getenv("MAX_STEPS", "5"))
 
 # Websites allowed to call the API from a browser (CORS). Comma-separated in .env.
-# Defaults = common local dev servers. Add your Vercel URL when you deploy.
+# Defaults = the Vite dev server (frontend/). Add your Vercel URL when you deploy.
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "ALLOWED_ORIGINS",
-        "http://localhost:5500,http://127.0.0.1:5500,http://localhost:3000",
+        "http://localhost:5173,http://127.0.0.1:5173",
     ).split(",")
     if origin.strip()
 ]

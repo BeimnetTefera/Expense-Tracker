@@ -242,6 +242,43 @@ def test_rate_limited_request_never_calls_llm(client, monkeypatch):
     assert client.post("/chat", json={"session_id": SESSION_A, "message": "hi"}).status_code == 429
 
 
+# ---------- allowance: the "N/10 msgs left" pill ----------
+
+def test_limits_starts_full_and_peeking_is_free(client):
+    for _ in range(3):  # looking must never use up a message
+        body = client.get("/limits", params={"session_id": SESSION_A}).json()
+    assert body == {"limit": 10, "remaining": 10, "resets_in": None}
+
+
+def test_chat_response_carries_the_server_count(client):
+    for expected_left in (9, 8, 7):
+        body = client.post("/chat", json={"session_id": SESSION_A, "message": "hi"}).json()
+        assert body["allowance"]["remaining"] == expected_left
+        assert 0 < body["allowance"]["resets_in"] <= 60
+
+    # A page reload asks /limits and must see the SAME count (the old bug: it showed 10 again).
+    assert client.get("/limits", params={"session_id": SESSION_A}).json()["remaining"] == 7
+
+
+def test_limits_shows_zero_when_blocked(client):
+    for _ in range(limits.per_session.limit + 2):
+        client.post("/chat", json={"session_id": SESSION_A, "message": "hi"})
+    assert client.get("/limits", params={"session_id": SESSION_A}).json()["remaining"] == 0
+
+
+def test_limits_reflects_the_ip_layer(client):
+    # 25 messages from other sessions on the same IP leave only 5 for a fresh session.
+    for i in range(25):
+        client.post("/chat", json={"session_id": f"other-session-{i:04d}", "message": "hi"})
+    assert client.get("/limits", params={"session_id": SESSION_B}).json()["remaining"] == 5
+
+
+def test_failed_llm_call_is_not_counted_in_allowance(client, monkeypatch):
+    monkeypatch.setattr(runtime, "get_llm_response", lambda m: (_ for _ in ()).throw(RuntimeError("LLM_UNAVAILABLE")))
+    client.post("/chat", json={"session_id": SESSION_A, "message": "hi"})
+    assert client.get("/limits", params={"session_id": SESSION_A}).json()["remaining"] == 10
+
+
 # ---------- CORS ----------
 
 def preflight(client, origin):

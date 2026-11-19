@@ -1,6 +1,9 @@
-pydantic
-python-dotenv
+# Pinned to the versions tested locally, so the server installs exactly these.
+fastapi==0.163.2
+uvicorn==0.54.0
+pydantic==2.14.3
+python-dotenv==1.2.4
+groq==1.7.0
+
+# Tests only (harmless on the server).
 pytest
-uvicorn
-groq
-fastapi

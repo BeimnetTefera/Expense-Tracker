@@ -19,10 +19,11 @@ from app.services.expense_services import (
     list_expenses,
 )
 from app.seed import reset_demo
-from app.api.limits import check_chat_limits, refund_chat_limits
+from app.api.limits import chat_allowance, check_chat_limits, refund_chat_limits
 from app.api.schema import (
     ApprovalRequest,
     ApprovalResponse,
+    ChatAllowance,
     ChatRequest,
     ChatResponse,
     PendingApproval,
@@ -60,6 +61,16 @@ def health_check():
     return {"status": "ok"}
 
 
+def client_ip_of(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+# The UI's "N/10 msgs left" pill. Read-only: looking doesn't use up a message.
+@app.get("/limits", response_model=ChatAllowance)
+def get_limits(request: Request, session_id: str = Query(min_length=8, max_length=150, pattern=r"^[A-Za-z0-9-]+$")):
+    return chat_allowance(session_id, client_ip_of(request))
+
+
 # Ask the DATABASE (source of truth) if a delete is waiting - never parse LLM text.
 def load_pending_approval(conn, owner):
     row = get_pending_approval(conn, owner)
@@ -79,7 +90,7 @@ def load_pending_approval(conn, owner):
 @app.post("/chat", response_model=ChatResponse)
 def chat(body: ChatRequest, request: Request):
     # Rate limit BEFORE any work: a refused request costs no Groq tokens.
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = client_ip_of(request)
     wait = check_chat_limits(body.session_id, client_ip)
     if wait is not None:
         raise HTTPException(
@@ -109,6 +120,7 @@ def chat(body: ChatRequest, request: Request):
             reply=result.reply,
             trace=result.trace,
             pending_approval=load_pending_approval(conn, body.session_id),
+            allowance=chat_allowance(body.session_id, client_ip),
         )
     finally:
         conn.close()  # always runs, even if run_agent raised an error

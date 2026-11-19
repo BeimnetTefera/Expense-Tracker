@@ -18,10 +18,18 @@ class PendingApproval(BaseModel):
     expenses: list[dict]  # the exact expenses that would be deleted
 
 
+# "How many messages can I still send?" - counted by the server, shown in the UI pill.
+class ChatAllowance(BaseModel):
+    limit: int                      # per-session messages per minute
+    remaining: int
+    resets_in: float | None = None  # seconds until one more message frees up
+
+
 class ChatResponse(BaseModel):
     reply: str
     trace: list[dict]
     pending_approval: PendingApproval | None = None  # set -> UI shows the card
+    allowance: ChatAllowance                          # fresh count AFTER this message
 
 
 class ApprovalRequest(BaseModel):
