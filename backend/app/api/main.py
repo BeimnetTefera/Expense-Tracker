@@ -19,7 +19,13 @@ from app.services.expense_services import (
     list_expenses,
 )
 from app.seed import reset_demo
-from app.api.limits import chat_allowance, check_chat_limits, refund_chat_limits
+from app.api.limits import (
+    chat_allowance,
+    check_chat_limits,
+    close_persistence,
+    load_persisted_hits,
+    refund_chat_limits,
+)
 from app.api.schema import (
     ApprovalRequest,
     ApprovalResponse,
@@ -40,7 +46,10 @@ async def lifespan(app: FastAPI):
         init_db(conn)
     finally:
         conn.close()
+    # Reload message counts from before a restart (else everyone gets a fresh 10/10).
+    load_persisted_hits(DB_PATH)
     yield  # the server runs while we're "inside" here
+    close_persistence()
 
 
 app = FastAPI(title="Expense Tracker Agent API", lifespan=lifespan)

@@ -321,3 +321,16 @@ def test_session_refusal_does_not_charge_ip(client):
 
     # Only the 10 accepted requests count against the IP, not the refused ones.
     assert len(limits.per_ip.hits["testclient"]) == limits.per_session.limit
+
+
+def test_limits_survive_a_server_restart(client):
+    for _ in range(3):
+        client.post("/chat", json={"session_id": SESSION_A, "message": "hi"})
+
+    # Simulate the server going down: memory is wiped...
+    for limiter in limits.LIMITERS:
+        limiter.hits.clear()
+    # ...and coming back up (startup runs the lifespan again).
+    with TestClient(main.app) as restarted:
+        body = restarted.get("/limits", params={"session_id": SESSION_A}).json()
+    assert body["remaining"] == 7

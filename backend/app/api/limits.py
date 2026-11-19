@@ -1,17 +1,34 @@
 # Rate limiting: protects the Groq bill once the API is public.
-# In-memory "sliding window": remember WHEN recent requests happened per key,
+# "Sliding window": remember WHEN recent requests happened per key,
 # and refuse when too many fall inside the window.
 #
-# Trade-off (fine for a one-instance demo): counts reset on restart and are not
-# shared between processes. At scale you'd keep these counters in Redis.
+# The timestamps live in memory (fast checks) AND are written through to a
+# SQLite table, so a server restart doesn't hand everyone a fresh allowance:
+# on startup, load_persisted_hits() reloads whatever is still inside a window.
+# Trade-off (fine for a one-instance demo): not shared between processes.
+# At scale you'd keep these counters in Redis.
 
+import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
 
+# One shared connection for all limiters, set by load_persisted_hits().
+# None = memory only (e.g. before startup). Guarded by _db_lock.
+_db: sqlite3.Connection | None = None
+_db_lock = threading.Lock()
+
+
+def _db_write(sql: str, params: tuple = ()):
+    with _db_lock:
+        if _db is not None:
+            _db.execute(sql, params)
+            _db.commit()
+
 
 class SlidingWindowLimiter:
-    def __init__(self, limit: int, window_seconds: float):
+    def __init__(self, name: str, limit: int, window_seconds: float):
+        self.name = name  # row label in the rate_limit_hits table
         self.limit = limit
         self.window = window_seconds
         self.hits = defaultdict(deque)  # key -> timestamps of recent requests
@@ -22,7 +39,7 @@ class SlidingWindowLimiter:
     def check(self, key: str) -> float | None:
         """Record a request for `key`.
         Returns None if allowed, or the seconds to wait if over the limit."""
-        now = time.monotonic()
+        now = time.time()  # wall clock: must mean the same after a restart
         with self.lock:
             timestamps = self.hits[key]
 
@@ -35,12 +52,16 @@ class SlidingWindowLimiter:
                 return self.window - (now - timestamps[0])
 
             timestamps.append(now)
+            _db_write(
+                "INSERT INTO rate_limit_hits(limiter, key, ts) VALUES (?, ?, ?)",
+                (self.name, key, now),
+            )
             return None
 
     def peek(self, key: str) -> tuple[int, float | None]:
         """Look WITHOUT recording: (requests left, seconds until the next slot frees).
         The second value is None when nothing is in the window."""
-        now = time.monotonic()
+        now = time.time()  # wall clock: must mean the same after a restart
         with self.lock:
             timestamps = self.hits[key]
             while timestamps and now - timestamps[0] >= self.window:
@@ -53,17 +74,65 @@ class SlidingWindowLimiter:
         """Give back the most recent request for `key` (it failed on our side)."""
         with self.lock:
             if self.hits[key]:
-                self.hits[key].pop()
+                ts = self.hits[key].pop()
+                _db_write(
+                    "DELETE FROM rate_limit_hits WHERE limiter = ? AND key = ? AND ts = ?",
+                    (self.name, key, ts),
+                )
 
     def reset(self):
         with self.lock:
             self.hits.clear()
+            _db_write("DELETE FROM rate_limit_hits WHERE limiter = ?", (self.name,))
 
 
 # Three layers - each stops a different kind of abuse.
-per_session = SlidingWindowLimiter(limit=10, window_seconds=60)       # one chatty user
-per_ip = SlidingWindowLimiter(limit=30, window_seconds=60)            # fake session ids
-global_daily = SlidingWindowLimiter(limit=300, window_seconds=86400)  # caps the bill
+per_session = SlidingWindowLimiter("session", limit=10, window_seconds=60)      # one chatty user
+per_ip = SlidingWindowLimiter("ip", limit=30, window_seconds=60)                # fake session ids
+global_daily = SlidingWindowLimiter("daily", limit=300, window_seconds=86400)   # caps the bill
+LIMITERS = (per_session, per_ip, global_daily)
+
+
+def load_persisted_hits(db_path: str):
+    """Called once at startup: open the rate-limit table and reload every hit
+    that is still inside its window, so a restart doesn't reset anyone's count."""
+    global _db
+    conn = sqlite3.connect(db_path, check_same_thread=False)  # used from worker threads, behind _db_lock
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rate_limit_hits(
+            limiter TEXT NOT NULL,
+            key TEXT NOT NULL,
+            ts REAL NOT NULL
+        )
+    """)
+    now = time.time()
+    for limiter in LIMITERS:
+        # Expired rows are useless: drop them so the table stays small.
+        conn.execute(
+            "DELETE FROM rate_limit_hits WHERE limiter = ? AND ts <= ?",
+            (limiter.name, now - limiter.window),
+        )
+        rows = conn.execute(
+            "SELECT key, ts FROM rate_limit_hits WHERE limiter = ? ORDER BY ts",
+            (limiter.name,),
+        ).fetchall()
+        with limiter.lock:
+            limiter.hits.clear()
+            for key, ts in rows:
+                limiter.hits[key].append(ts)
+    conn.commit()
+    with _db_lock:
+        if _db is not None:
+            _db.close()
+        _db = conn
+
+
+def close_persistence():
+    global _db
+    with _db_lock:
+        if _db is not None:
+            _db.close()
+        _db = None
 
 
 def check_chat_limits(session_id: str, client_ip: str) -> float | None:
@@ -111,5 +180,5 @@ def chat_allowance(session_id: str, client_ip: str) -> dict:
 
 def reset_all():
     """For tests: start every limiter from zero."""
-    for limiter in (per_session, per_ip, global_daily):
+    for limiter in LIMITERS:
         limiter.reset()
